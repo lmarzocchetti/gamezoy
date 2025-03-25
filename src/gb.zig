@@ -2,19 +2,19 @@ const Cpu = @import("cpu.zig").Cpu;
 
 const Status = struct {
     debug: bool = false,
-    is_running: bool = false,
+    is_running: bool = true,
     is_paused: bool = false,
     do_step: bool = false,
 };
 
-const GB = struct {
+pub const Gb = struct {
     const Self = @This();
 
     cpu: Cpu,
     status: Status,
 
     pub fn init() Self {
-        return GB{
+        return Gb{
             .cpu = Cpu.init(),
             .status = Status{},
         };
