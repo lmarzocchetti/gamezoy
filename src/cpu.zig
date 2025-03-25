@@ -41,31 +41,57 @@ const Register = struct {
     }
 
     pub fn inc(self: *Self) void {
+        // TODO: Controllare se serve settare flag carry ecc
         self.value += 1;
     }
 
     pub fn dec(self: *Self) void {
+        // TODO: Controllare se serve settare flag carry ecc
         self.value -= 1;
     }
 
-    pub fn incHi(self: *Self) void {
+    pub fn incHi(self: *Self, cpu: *Cpu) void {
+        cpu.set_flags(@intFromEnum(RegisterFlags.FLAG_HALF_CARRY), (self.getHi() & 0x0f) == 0x0f);
+
         self.setHi(self.getHi() + 1);
+
+        cpu.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), if (self.getHi() == 0) true else false);
+        cpu.set_flags(@intFromEnum(RegisterFlags.FLAG_SUBTRACT), false);
     }
 
-    pub fn decHi(self: *Self) void {
+    pub fn decHi(self: *Self, cpu: *Cpu) void {
+        cpu.set_flags(@intFromEnum(RegisterFlags.FLAG_HALF_CARRY), if ((self.getHi() & 0x0f) == 0) true else false);
+
         self.setHi(self.getHi() - 1);
+
+        cpu.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), if (self.getHi() == 0) true else false);
+        cpu.set_flags(@intFromEnum(RegisterFlags.FLAG_SUBTRACT), true);
     }
 
-    pub fn incLow(self: *Self) void {
+    pub fn incLow(self: *Self, cpu: *Cpu) void {
+        cpu.set_flags(@intFromEnum(RegisterFlags.FLAG_HALF_CARRY), (self.getLow() & 0x0f) == 0x0f);
+
         self.setLow(self.getLow() + 1);
+
+        cpu.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), (self.getLow() == 0));
+        cpu.set_flags(@intFromEnum(RegisterFlags.FLAG_SUBTRACT), false);
     }
 
-    pub fn decLow(self: *Self) void {
+    pub fn decLow(self: *Self, cpu: *Cpu) void {
+        cpu.set_flags(@intFromEnum(RegisterFlags.FLAG_HALF_CARRY), if ((self.getLow() & 0x0f) == 0) true else false);
+
         self.setLow(self.getLow() - 1);
+
+        cpu.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), (self.getLow() == 0));
+        cpu.set_flags(@intFromEnum(RegisterFlags.FLAG_SUBTRACT), true);
     }
 
     pub fn calculate_flags(start: u8, flags: u8, state: bool) u8 {
-        return if (state) (start | flags) else (start & ~flags);
+        return if (state) (start | flags) else (start & (~flags));
+    }
+
+    pub fn is_flag_set(reg: u8, flag: u8) bool {
+        return if ((reg & flag) == 1) true else false;
     }
 };
 
@@ -116,6 +142,11 @@ const Memory = struct {
 
     pub fn read_short(self: *const Self, address: u16) u16 {
         return self.read_byte(address) | (@as(u16, self.read_byte(address + 1)) << 8);
+    }
+
+    pub fn write_short(self: *Self, address: u16, value: u16) void {
+        self.write_byte(address, @intCast(value & 0x00ff));
+        self.write_byte(address + 1, @intCast((value & 0xff00) >> 8));
     }
 };
 
@@ -192,19 +223,87 @@ pub const Cpu = struct {
         };
     }
 
+    fn set_flags(self: *Self, flags: u8, condition: bool) void {
+        self.af.setLow(Register.calculate_flags(self.af.getLow(), flags, condition));
+    }
+
     fn xor_a(self: *Self, value: u8) void {
         self.af.setHi(self.af.getHi() ^ value);
 
         const state = if (self.af.getHi() == 0) true else false;
-        self.af.setLow(Register.calculate_flags(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_ZERO), state));
-        self.af.setLow(Register.calculate_flags(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_CARRY) | @intFromEnum(RegisterFlags.FLAG_SUBTRACT) | @intFromEnum(RegisterFlags.FLAG_HALF_CARRY), false));
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), state);
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_CARRY) | @intFromEnum(RegisterFlags.FLAG_SUBTRACT) | @intFromEnum(RegisterFlags.FLAG_HALF_CARRY), false);
+    }
+
+    fn jump_add(self: *Self, condition: bool) void {
+        if (condition) {
+            self.pc += 1 + (self.memory.read_byte(self.pc));
+            self.clock.t_instr += 12;
+        } else {
+            self.pc += 1;
+            self.clock.t_instr += 8;
+        }
     }
 
     fn bit_extended(self: *Self, bit: u8, value: u8) void {
         const state = if ((value & bit) == 0) true else false;
-        self.af.setLow(Register.calculate_flags(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_ZERO), state));
-        self.af.setLow(Register.calculate_flags(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_HALF_CARRY), true));
-        self.af.setLow(Register.calculate_flags(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_SUBTRACT), false));
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), state);
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_HALF_CARRY), true);
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_SUBTRACT), false);
+    }
+
+    fn rlc(self: *Self, value: u8) u8 {
+        var retval = value;
+        const carry = (retval >> 7) & 0x01;
+
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_CARRY), if ((retval * (1 << 7)) == 0) false else true);
+
+        retval <<= 1;
+        retval += carry;
+
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), if (retval == 0) true else false);
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_SUBTRACT) | @intFromEnum(RegisterFlags.FLAG_HALF_CARRY), false);
+
+        return retval;
+    }
+
+    fn rr(self: *Self, value: u8) u8 {
+        var retval = value;
+        const carry = Register.is_flag_set(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_CARRY));
+
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_CARRY), if (value & 0x01 == 0) false else true);
+        retval >>= 1;
+        retval |= (carry << 7);
+
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), (retval == 0));
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_SUBTRACT) | @intFromEnum(RegisterFlags.FLAG_HALF_CARRY), false);
+
+        return retval;
+    }
+
+    fn rrc(self: *Self, value: u8) u8 {
+        var retval = value;
+        const carry = retval & 0x01;
+
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_CARRY), if (carry == 0) false else true);
+        retval >>= 1;
+        retval |= (carry << 7);
+
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), (retval == 0));
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_SUBTRACT) | @intFromEnum(RegisterFlags.FLAG_HALF_CARRY), false);
+
+        return retval;
+    }
+
+    fn add_u16_u16(self: *Self, destination: u16, value: u16) u16 {
+        const result: u32 = destination + value;
+
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_CARRY), (result > 0xffff));
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_HALF_CARRY), (((destination & 0x0fff) + (value & 0x0fff)) > 0x0fff));
+
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_SUBTRACT), false);
+
+        return @intCast(result);
     }
 
     fn extended_execute(self: *Self, opcode: u8) void {
@@ -225,7 +324,10 @@ pub const Cpu = struct {
         self.clock.t_instr += Cpu.instructionTicks[opcode];
 
         switch (opcode) {
-            0x00 => {}, // NOP
+            0x00 => {
+                std.debug.print("DEBUG: {any}\n", .{self.pc});
+                std.process.exit(1);
+            }, // NOP
             0x01 => { // LD BC, nn
                 self.bc.set(self.memory.read_short(self.pc));
                 self.pc += 2;
@@ -237,14 +339,66 @@ pub const Cpu = struct {
                 self.bc.inc();
             },
             0x04 => { // INC B
-                self.bc.incHi();
+                self.bc.incHi(self);
             },
             0x05 => { // DEC B
-                self.bc.decHi();
+                self.bc.decHi(self);
             },
             0x06 => { // LD B, n
                 self.bc.setHi(self.memory.read_byte(self.pc));
                 self.pc += 1;
+            },
+            0x07 => { // RLCA
+                self.af.setHi(self.rlc(self.af.getHi()));
+                self.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), false);
+            },
+            0x08 => { // LD (nn), SP
+                self.memory.write_short(self.memory.read_short(self.pc), self.sp);
+                self.pc += 2;
+            },
+            0x09 => { // ADD HL, BC
+                self.hl.set(self.add_u16_u16(self.hl.get(), self.bc.get()));
+            },
+            0x0A => { // LD A, (BC)
+                self.af.setHi(self.memory.read_byte(self.bc.get()));
+            },
+            0x0B => { // DEC BC
+                self.bc.dec();
+            },
+            0x0C => { // INC C
+                self.bc.incLow(self);
+            },
+            0x0D => { // DEC C
+                self.bc.decLow(self);
+            },
+            0x0E => { // LD C, n
+                self.bc.setLow(self.memory.read_byte(self.pc));
+                self.pc += 1;
+            },
+            0x0F => { // RRCA
+                self.af.setHi(self.rrc(self.af.getHi()));
+                self.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), false);
+            },
+            0x10 => { // STOP
+            },
+            0x11 => { // LD DE, nn
+                self.de.set(self.memory.read_short(self.pc));
+                self.pc += 2;
+            },
+            0x12 => { // LD (DE), A
+                self.memory.write_byte(self.de.get(), self.af.getHi());
+            },
+            0x13 => { // INC DE
+                self.de.set(self.de.get() + 1);
+            },
+            0x14 => { // INC D
+                self.de.incHi(self);
+            },
+            0x15 => {
+                self.de.decHi(self);
+            },
+            0x20 => {
+                self.jump_add(!Register.is_flag_set(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_ZERO)));
             },
             0x21 => {
                 self.hl.set(self.memory.read_short(self.pc));
