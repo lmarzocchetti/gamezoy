@@ -252,6 +252,21 @@ pub const Cpu = struct {
         self.set_flags(@intFromEnum(RegisterFlags.FLAG_SUBTRACT), false);
     }
 
+    fn rl(self: *Self, value: u8) u8 {
+        var retval = value;
+        const carry = Register.is_flag_set(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_CARRY));
+
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_CARRY), if ((retval & (1 << 7)) == 0) false else true);
+
+        retval <<= 1;
+        retval += @intFromBool(carry);
+
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), retval == 0);
+        self.set_flags(@intFromEnum(RegisterFlags.FLAG_SUBTRACT) | @intFromEnum(RegisterFlags.FLAG_HALF_CARRY), false);
+
+        return retval;
+    }
+
     fn rlc(self: *Self, value: u8) u8 {
         var retval = value;
         const carry = (retval >> 7) & 0x01;
@@ -273,7 +288,7 @@ pub const Cpu = struct {
 
         self.set_flags(@intFromEnum(RegisterFlags.FLAG_CARRY), if (value & 0x01 == 0) false else true);
         retval >>= 1;
-        retval |= (carry << 7);
+        retval |= (@as(u8, @intFromBool(carry)) << 7);
 
         self.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), (retval == 0));
         self.set_flags(@intFromEnum(RegisterFlags.FLAG_SUBTRACT) | @intFromEnum(RegisterFlags.FLAG_HALF_CARRY), false);
@@ -394,15 +409,126 @@ pub const Cpu = struct {
             0x14 => { // INC D
                 self.de.incHi(self);
             },
-            0x15 => {
+            0x15 => { // DEC D
                 self.de.decHi(self);
             },
-            0x20 => {
+            0x16 => { // LD D, n
+                self.de.setHi(self.memory.read_byte(self.pc));
+                self.pc += 1;
+            },
+            0x17 => { // RLA
+                self.af.setHi(self.rl(self.af.getHi()));
+                self.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), false);
+            },
+            0x18 => { // JR nn
+                // TODO: Check better
+                const operand: u8 = self.memory.read_byte(self.pc);
+                const new_pc = @as(i32, self.pc) + 1 + @as(i8, @intCast(operand));
+                self.pc = @intCast(new_pc);
+            },
+            0x19 => { // ADD HL, DE
+                self.hl.set(self.add_u16_u16(self.hl.get(), self.de.get()));
+            },
+            0x1A => { // LD A, (DE)
+                self.af.setHi(self.memory.read_byte(self.de.get()));
+            },
+            0x1B => { // DEC DE
+                self.de.dec();
+            },
+            0x1C => { // INC E
+                self.de.incLow(self);
+            },
+            0x1D => { // DEC E
+                self.de.decLow(self);
+            },
+            0x1E => { // LD E, n
+                self.de.setLow(self.memory.read_byte(self.pc));
+                self.pc += 1;
+            },
+            0x1F => { // RRA
+                self.af.setHi(self.rr(self.af.getHi()));
+                self.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), false);
+            },
+            0x20 => { // JR NZ, *
                 self.jump_add(!Register.is_flag_set(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_ZERO)));
             },
-            0x21 => {
+            0x21 => { // LD HL, nn
                 self.hl.set(self.memory.read_short(self.pc));
                 self.pc += 2;
+            },
+            0x22 => { // LD (HLI), A | LD (HL+), A | LDI (HL), A
+                self.memory.write_byte(self.hl.get(), self.af.getHi());
+                self.hl.inc();
+            },
+            0x23 => { // INC HL
+                self.hl.inc();
+            },
+            0x24 => { // INC H
+                self.hl.incHi(self);
+            },
+            0x25 => { // DEC H
+                self.hl.decHi(self);
+            },
+            0x26 => { // LD H, n
+                self.hl.setHi(self.memory.read_byte(self.pc));
+                self.pc += 1;
+            },
+            0x27 => { // DAA
+                var value: u16 = self.af.getHi();
+
+                if (Register.is_flag_set(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_SUBTRACT))) {
+                    if (Register.is_flag_set(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_CARRY))) {
+                        value -= 0x60;
+                    }
+
+                    if (Register.is_flag_set(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_HALF_CARRY))) {
+                        value -= 0x6;
+                    }
+                } else {
+                    if (Register.is_flag_set(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_CARRY)) or value > 0x99) {
+                        value += 0x60;
+                        self.set_flags(@intFromEnum(RegisterFlags.FLAG_CARRY), true);
+                    }
+
+                    if (Register.is_flag_set(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_HALF_CARRY)) or (value & 0xF) > 0x9) {
+                        value += 0x6;
+                    }
+                }
+
+                self.af.setHi(@intCast(value));
+
+                self.set_flags(@intFromEnum(RegisterFlags.FLAG_ZERO), self.af.getHi() == 0);
+                self.set_flags(@intFromEnum(RegisterFlags.FLAG_HALF_CARRY), false);
+            },
+            0x28 => { // JR Z, *
+                self.jump_add(Register.is_flag_set(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_ZERO)));
+            },
+            0x29 => { // ADD HL, HL
+                self.hl.set(self.add_u16_u16(self.hl.get(), self.hl.get()));
+            },
+            0x2A => { // LD A, (HL+)
+                self.af.setHi(self.memory.read_byte(self.hl.get()));
+                self.hl.inc();
+            },
+            0x2B => { // DEC HL
+                self.hl.dec();
+            },
+            0x2C => { // INC L
+                self.hl.incLow(self);
+            },
+            0x2D => { // DEC L
+                self.hl.decLow(self);
+            },
+            0x2E => { // LD L, n
+                self.hl.setLow(self.memory.read_byte(self.pc));
+                self.pc += 1;
+            },
+            0x2F => { // CPL
+                self.af.setHi(~self.af.getHi());
+                self.set_flags(@intFromEnum(RegisterFlags.FLAG_SUBTRACT) | @intFromEnum(RegisterFlags.FLAG_HALF_CARRY), true);
+            },
+            0x30 => { // JR NC, *
+                self.jump_add(!Register.is_flag_set(self.af.getLow(), @intFromEnum(RegisterFlags.FLAG_CARRY)));
             },
             0x31 => {
                 self.sp = self.memory.read_short(self.pc);
@@ -411,6 +537,12 @@ pub const Cpu = struct {
             0x32 => {
                 self.memory.write_byte(self.hl.get(), self.af.getHi());
                 self.hl.dec();
+            },
+            0x33 => { // INC SP
+                self.sp += 1;
+            },
+            0x35 => { // DEC (HL)
+
             },
             0xAF => {
                 self.xor_a(self.af.getHi());

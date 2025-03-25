@@ -2,7 +2,7 @@ const Cpu = @import("cpu.zig").Cpu;
 
 const Status = struct {
     debug: bool = false,
-    is_running: bool = true,
+    is_running: bool = false,
     is_paused: bool = false,
     do_step: bool = false,
 };
@@ -16,7 +16,7 @@ pub const Gb = struct {
     pub fn init() Self {
         return Gb{
             .cpu = Cpu.init(),
-            .status = Status{},
+            .status = Status{ .is_running = true },
         };
     }
 
